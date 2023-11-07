@@ -1,11 +1,30 @@
 #!/bin/env python
 
-## Have scope be something you can pass around,
-## as a dynamicaly built namespace, and a replacement for objects
+# -- ADDED: --
+#  - the \logging, \ast, and \stack controll tokens
+#  - the anatation system
+#  - added strings
+#  - split atom
+#  - basic pyeval
+
+# Have scope be something you can pass around,
+# as a dynamicaly built namespace, and a replacement for objects
+
+# tail call elminination and recursion optimisation
+# (define fact (lambda (n) (cond (= n 1) n True (* n (fact (- n 1))))))
+# (fact 425) ok (fact 425) exseads recursion limit
+# (define fact-2 (lambda (n acc)
+#                 (cond (= n 1) acc True (fact-2 (- n 1) (* acc n)))))
+# (fact-2 595 1) ok (fact-2 596 1) exseads recursion limit
+
 
 import readline
 from pathlib import Path
 import regex_spm as rem
+
+py_eval = eval
+
+LOGGING = False
 
 
 def log(*args, **kwargs):
@@ -13,17 +32,22 @@ def log(*args, **kwargs):
         print(*args, **kwargs)
 
 
-def two_at_a_time(iter):
-    N = 2
-    c = 0
-    buf = []
-    for i in iter:
-        c += 1
-        buf.append(i)
-        if c == N:
-            c = 0
-            yield tuple(buf)
-            buf = []
+def N_at_a_time(N):
+    def generator(iter):
+        N = 2
+        c = 0
+        buf = []
+        for i in iter:
+            c += 1
+            buf.append(i)
+            if c == N:
+                c = 0
+                yield tuple(buf)
+                buf = []
+    return generator
+
+
+two_at_a_time = N_at_a_time(2)
 
 
 def read(string: str):
@@ -59,7 +83,7 @@ def wordify(string: str):
                     buffer += key
             case Mode.quote:
                 if key == quote_string:
-                    yield buffer
+                    yield '"' + buffer + '"'
                     buffer = ''
                     mode = Mode.normal
                 else:
@@ -89,6 +113,10 @@ def tokenize(words):
                 b = '0' if len(b) == 0 else ''.join(b)
                 word = f'{a}.{b}'
                 yield ('decimal', float(word))
+            case r'"[^"]*"':
+                yield ('string', word[1:-1])
+            case r'\\\S+':
+                yield ('control', word[1:])
             case _:
                 yield ('word', word)
 
@@ -119,6 +147,18 @@ def build_ast(tokens):
                 stack[-1].append(w)
             case ('bool', b):
                 stack[-1].append(('value', 'bool', b))
+            case ('string', string):
+                stack[-1].append(('value', 'string', string))
+
+            case ('control', 'ast'):
+                print(stack)
+            case ('control', 'logging'):
+                global LOGGING
+                LOGGING = not LOGGING
+                print('Logging =', LOGGING)
+            case ('control', word):
+                stack[-1].append(('control', word))
+
             case _:
                 print('unknown read')
 
@@ -138,10 +178,29 @@ def eval(expr, e):
     match expr:  # special forms
         case ():
             return ()
-        case  ('value', *_) | '+' | '-' | '*' | '/' | 'display' | '=':
+        case ('control', 'stack'):
+            print(e)
+            return ()
+        case ('annatation', *tail):
+            if len(tail) == 0:
+                return ('annatation', ())
+            body = tail[-1]
+            comments = tail[:-1]
+            return ('annatation', *comments, eval(body, e))
+        case  ('value', *_) | '+' | '-' | '*' | '/' | 'display' | '=' | 'get-annatation' | 'split-atom' | 'py-call':
             return expr
         case ('cond', *body):
             return apply('cond', body, e)
+        case ('if', cond, *branches):
+            if len(branches) == 1:
+                happy_path, sad_path = branches[1], ()
+            elif len(branches) == 2:
+                happy_path, sad_path = branches
+            else:
+                return ('Error', 'if needs 1 conndition and 1 or 2 branches')
+            return apply('cond', (
+                         cond, happy_path,
+                         ('value', 'bool', True), sad_path), e)
         case ('lambda', arglist, *body):
             return ('lambda', arglist, *body)
         case ('let', letlist, *body):
@@ -152,11 +211,11 @@ def eval(expr, e):
             e.pop()
             return result
         case ('quote', *a):
-            return a
+            if len(a) != 1:
+                return ('Error', 'Quote takes one argument')
+            return a[0]
         case ('define', word, value):
             return e.set(word, eval(value, e))
-        case ('cond', *_):
-            pass
         case ('list', *body):
             return ('list', *(eval(b, e) for b in body))
         case str():
@@ -186,6 +245,44 @@ def apply(func, args, e):
     match func:
         case ('Error', *_):
             return (*func, 'from function application')
+
+        case 'get-annatation':
+            if len(args) != 1:
+                return ('Error', 'get-annatation takes one argument')
+            ann = args[0]
+            assert len(ann) >= 2, 'Malformed Annatation'
+            if ann[0] != 'annatation':
+                return ('Error', 'get-annatation called on non-anatation')
+            comments = ann[2:]
+            return ('list', *comments)
+
+        case 'split-atom':
+            if len(args) != 1:
+                return ('Error', 'split-atom takes one argument')
+            return ('list', *args[0])
+
+        case 'py-call':
+            func, *poss_args = args
+            py_args = [str(value_of(a)) for a in poss_args]
+            try:
+                call_line = f'{func}({", ".join(py_args)})'
+                log(10*' '+call_line)
+                result = py_eval(call_line)
+            except Exception as e:
+                return ('Error', 'python error:', e)
+
+            match type(result):
+                case int(n):
+                    return ('value', 'intiger', n)
+                case float(f):
+                    return ('value', 'decimal', f)
+                case str(s):
+                    return ('value', 'string', s)
+                case bool(b):
+                    return ('value', 'bool', b)
+                case _:
+                    return ('value', 'pyval', result)
+
         case ('lambda', arglist, *body):
             if len(arglist) != len(args):
                 return ('Error', f'Incorrect arity, expected {len(arglist)} recived {len(args)}', (func, args))
@@ -365,15 +462,33 @@ class Enviroment:
 def display(expr):
     line = ''
     match expr:
+        case ('annatation', *tail):
+            if len(tail) == 0:
+                line += 'emmpty annatation'
+            else:
+                body = tail[-1]
+                comments = tail[:-1]
+                line += display(body)
+                if (c := len(comments)) > 0:
+                    line += '*'
+                    if c > 1:
+                        line += str(c)
         case ('value', type, value):
             line += str(value) + ' [' + type + ']'
+        case ('list', *body):
+            line += '['
+            line += ', '.join([display(e) for e in expr[1:]])
+            line += ']'
+        case str():
+            line += expr
+        case tuple():
+            line += '(' + ' '.join([display(e) for e in expr]) + ')'
         case _:
             line += str(expr)
     return line
 
 
 if __name__ == '__main__':
-    LOGGING = False
     histfile = Path('.lisp-3.histfile')
     histfile.touch()
     readline.read_history_file(histfile)
@@ -382,7 +497,8 @@ if __name__ == '__main__':
         e = Enviroment()
         while True:
             inp = read(input('> '))
-            val = eval(inp, e)
-            print(display(val))
+            if inp is not None:
+                val = eval(inp, e)
+                print(display(val))
     finally:
         readline.write_history_file(histfile)
