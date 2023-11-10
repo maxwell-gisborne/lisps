@@ -7,16 +7,16 @@
 
 typedef struct {
     size_t len;
-    char* cont;
+    char *cont;
 } Str;
 
-Str string(size_t len, char* cont){
+Str string(size_t len, char *cont){
     Str string = {.len=len, .cont=cont};
     return string;
 }
 
 
-Str str(char* cont){
+Str str(char *cont){
     int i=0;
     while (true){
         if (cont[i] == '\0') return string(i, cont);
@@ -37,7 +37,7 @@ void printstr(Str string){
     }
 }
 
-void Str_Free (Str* string) {
+void Str_Free (Str *string) {
     free(string->cont);
     free(string);
 };
@@ -60,14 +60,19 @@ typedef struct {
 // line breaks should be an array of offsets j, such that j indexes an \n or an EOF
 typedef struct {
     size_t lines;
-    size_t* line_breaks;
-    char* raw;
+    size_t *line_breaks;
+    char *raw;
     size_t word_count;
-    Str* words;
+    Str *words;
     Callbacks append_callbacks;
 } Document;
 
-void Document_Free(Document* doc) {
+typedef struct{
+    enum {WORD, INT, DECIMAL, FLOAT}  type;
+    Str *raw;
+} Token;
+
+void Document_Free(Document *doc) {
     free(doc->raw);
     free(doc->line_breaks);
     free(doc);
@@ -87,11 +92,17 @@ void push_word(Document *doc, Str *buffer){
     buffer->cont[0] = '\0';
 }
 
+typedef struct {
+    bool in_quote;
+    size_t line_index;
+    size_t words_added;
+} Document_append_Result;
 
-void Document_append(Document* doc, Str* string){
+Document_append_Result Document_append(Document *doc, Str *string){
     doc->line_breaks = realloc( doc->line_breaks,
             (doc->lines+1)*sizeof(size_t));
     if (doc->line_breaks == NULL) perror("failed to alloc linebreakes");
+
 
     size_t end_of_old_line;
     size_t start_of_new_line;
@@ -117,12 +128,15 @@ void Document_append(Document* doc, Str* string){
         doc->raw[ start_of_new_line + i ] = string->cont[i];
     }
 
-    typedef enum {NORMAL_MODE, QUOTE_MODE} MODE;
+    typedef enum {NORMAL_MODE, QUOTE_MODE, ESCAPE_MODE} MODE;
     MODE mode = NORMAL_MODE;
+    MODE prior_mode;
+
     char quote_char;
     Str buffer;
     if (doc->raw[end_of_old_line] == '"'
-       |doc->raw[end_of_old_line] == '\''){
+       |doc->raw[end_of_old_line] == '\''
+       |doc->raw[end_of_old_line] == '\\'){
         mode = QUOTE_MODE;
         quote_char = doc->raw[end_of_old_line];
         doc->word_count --;
@@ -137,9 +151,24 @@ void Document_append(Document* doc, Str* string){
     if (end_of_old_line != 0) doc->raw[end_of_old_line] = '\n';
     doc->lines ++;
 
+    size_t old_word_count = doc->word_count;
+
     for (int i=start_of_new_line; i<end_of_new_line; i++){
+        // This could be done better.
+        // buffer (oftype Str) contains a char* field, which could a poniter into raw
+        // that was adding newcharicters is just bumping the len filed.
+        // this would bean (A) nievly printing a word would print the entire subsiquent text
+        // and (B) the text of the document would not be duplicated in memory.
+        // As for now, the current solution is adiquet.
+        
         switch(mode){
             case NORMAL_MODE:
+                if (doc->raw[i] == '\\'){
+                    prior_mode = mode;
+                    mode = ESCAPE_MODE;
+                    break;
+                }
+
                 if ( doc->raw[i] == ' '
                    | doc->raw[i] == '\t') {
                     push_word(doc, &buffer);
@@ -156,6 +185,18 @@ void Document_append(Document* doc, Str* string){
                 break;
 
             case QUOTE_MODE:
+                if (doc->raw[i] == '\\'){
+                    prior_mode = mode;
+                    mode = ESCAPE_MODE;
+                    break;
+                }
+
+                if (quote_char == '\\'){
+                    Str_append(&buffer,' ');
+                    mode=NORMAL_MODE;
+                    break;
+                }
+
                 if (doc->raw[i] == quote_char){
                     push_word(doc, &buffer);
                     mode=NORMAL_MODE;
@@ -163,9 +204,20 @@ void Document_append(Document* doc, Str* string){
                 };
                 Str_append(&buffer,doc->raw[i]);
                 break;
+
+            case ESCAPE_MODE: 
+                mode = prior_mode;
+                Str_append(&buffer, doc->raw[i]);
+                break;
         }
+
     }
     
+    if (mode == ESCAPE_MODE){
+        mode = QUOTE_MODE;
+        quote_char = '\\';
+    }
+
     switch(mode){
         case NORMAL_MODE:
             if (buffer.len != 0){
@@ -175,19 +227,32 @@ void Document_append(Document* doc, Str* string){
                 free(buffer.cont);
             }
             break;
+
         case QUOTE_MODE:
             Str_append(&buffer, '\n');
             push_word(doc, &buffer);
             doc->raw[end_of_new_line] = quote_char;
             break;
+
+        case ESCAPE_MODE:
+            perror("Unreachable");
     }
 
 
-
+/*
     for (size_t ci=0; ci < doc->append_callbacks.len; ci++){
         void (*callback)(Document*, size_t) = doc->append_callbacks.callbacks[ci];
         callback(doc, doc->lines-1);
     }
+*/
+
+        Document_append_Result result = {
+            .in_quote = mode == QUOTE_MODE ? true : false,
+            .line_index = doc->lines ,
+            .words_added = (doc->word_count - old_word_count)
+        };
+
+        return result;
 }
 
 typedef struct {
@@ -195,7 +260,7 @@ typedef struct {
     Str result;
 } Document_get_line_Result;
 
-Document_get_line_Result Document_get_line(Document* doc, size_t n){
+Document_get_line_Result Document_get_line(Document *doc, size_t n){
     if (n > doc->lines) {
         Document_get_line_Result return_value = {.okay = false};
         return return_value;
@@ -205,7 +270,7 @@ Document_get_line_Result Document_get_line(Document* doc, size_t n){
     assert( end > start);
 
     size_t len = end-start;
-    char* cont = malloc(len*sizeof(char));
+    char *cont = malloc(len*sizeof(char));
     for (int i=0; i< len; i++) cont[i] = doc->raw[start+i];
     cont[end] = '\0';
 
@@ -222,14 +287,14 @@ Document_get_line_Result Document_get_line(Document* doc, size_t n){
 Str readline(Str prompt){
     assert(prompt.cont[prompt.len] == '\0');
     printf("%s", prompt.cont);
-    char* input;
+    char *input;
     size_t buffer_length = 0;
     size_t len = getline(&input, &buffer_length, stdin );
     assert(len != -1);
     return string(len-1, input);
 }
 
-void Document_print(Document* doc){
+void Document_print(Document *doc){
     for (int i=0; i<doc->lines; i++){
         Document_get_line_Result result = Document_get_line( doc, i);
         if (!result.okay) printf("Error\n");
@@ -244,7 +309,7 @@ void Tokenize_line(Document *doc, size_t line_number){
     int reti;
 }
 
-int main (int argc, char** argv){ 
+int main (int argc, char **argv){ 
 
     regex_t regex;
     assert(regcomp(&regex,"",0) == 0);
@@ -259,10 +324,24 @@ int main (int argc, char** argv){
     code.word_count = 0;
     code.words = malloc(0);
 
+    Document_append_Result append_result;
+    Str input;
+
     while (true) {
-        Str input = readline(str("> "));
+        size_t words_added = 0;
+        do {
+            input = readline(str("> "));
+            append_result = Document_append(&code, &input);
+            words_added += append_result.words_added;
+        } while (append_result.in_quote);
+
+        for (int i=0; i< words_added; i++) {
+            printf("%d:", i);
+            printstr(code.words [code.word_count - words_added + i]);
+            printf(" ");
+        }; printf("\n");
+
         if (Str_Equal(str("stop"), input)) break;
-        Document_append(&code, &input);
     }
     Document_print(&code);
 }
